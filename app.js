@@ -374,42 +374,80 @@ async function downloadMp3(mp3Url) {
   console.log("Downloading MP3 from URL:", mp3Url);
 
   try {
-    // Get the MP3 data as a buffer
-    const response = await axios({
-      url: mp3Url,
-      method: "GET",
-      responseType: "arraybuffer",
-    });
+    // Validate URL
+    if (!mp3Url) {
+      throw new Error('Invalid MP3 URL');
+    }
 
-    // Upload original to Cloudinary
-    const tempResult = await cloudinary.uploader.upload(
-      `data:audio/mp3;base64,${Buffer.from(response.data).toString('base64')}`,
-      {
-        resource_type: 'auto',
-        public_id: `temp_${Date.now()}`,
-        type: 'upload',
-        access_mode: 'public',
-        tags: ['temp_file']
+    // Add retries for download
+    let retries = 3;
+    let response;
+    
+    while (retries > 0) {
+      try {
+        response = await axios({
+          url: mp3Url,
+          method: "GET",
+          responseType: "arraybuffer",
+          timeout: 10000, // 10 second timeout
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          },
+          validateStatus: function (status) {
+            return status >= 200 && status < 300; // Accept only success status codes
+          }
+        });
+        break; // If successful, exit the retry loop
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw err;
+        console.log(`Retrying download... ${retries} attempts left`);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
       }
-    );
+    }
+
+    // Upload to Cloudinary with retry
+    let cloudinaryResult;
+    retries = 3;
+    
+    while (retries > 0) {
+      try {
+        cloudinaryResult = await cloudinary.uploader.upload(
+          `data:audio/mp3;base64,${Buffer.from(response.data).toString('base64')}`,
+          {
+            resource_type: 'auto',
+            public_id: `temp_${Date.now()}`,
+            type: 'upload',
+            access_mode: 'public',
+            tags: ['temp_file'],
+            timeout: 60000 // 60 second timeout
+          }
+        );
+        break;
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw err;
+        console.log(`Retrying upload... ${retries} attempts left`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
 
     // Trim using ffmpeg with Cloudinary URL
     return new Promise((resolve, reject) => {
       const outputFileName = `trimmed_${Date.now()}.mp3`;
       
-      ffmpeg(tempResult.secure_url)
+      ffmpeg(cloudinaryResult.secure_url)
         .setStartTime(0)
         .setDuration(59)
         .toFormat('mp3')
         .on('end', async () => {
           try {
-            // Delete the temporary file from Cloudinary
-            await cloudinary.uploader.destroy(tempResult.public_id, { resource_type: 'video' });
+            await cloudinary.uploader.destroy(cloudinaryResult.public_id, { resource_type: 'video' });
             console.log("Temporary file deleted from Cloudinary");
-            resolve(outputFileName);
+            resolve(cloudinaryResult.secure_url);
           } catch (err) {
             console.error("Error cleaning up temp file:", err);
-            resolve(outputFileName);
+            resolve(cloudinaryResult.secure_url);
           }
         })
         .on('error', (err) => {
@@ -435,7 +473,7 @@ async function downloadMp3(mp3Url) {
 
   } catch (error) {
     console.error("Error processing the MP3:", error);
-    throw error;
+    throw new Error(`Failed to process MP3: ${error.message}`);
   }
 }
 
