@@ -12,7 +12,6 @@ const ffmpegPath = require('ffmpeg-static');
 const cloudinary = require('cloudinary').v2;
 const Replicate = require('replicate');
 const cron = require('node-cron');
-const crypto = require('crypto');
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // Middleware
@@ -230,9 +229,6 @@ async function getMp3(mp3Url) {
 // Fetch Another Song
 async function fetchAnotherSong(lyrics, downloadedMp3) {
     try {
-        // Generate a unique song ID
-        const songId = generateSongId();
-        
         // Upload original song to Cloudinary
         const cloudinaryUrl = await uploadToCloudinary(downloadedMp3);
         console.log("Uploaded original to Cloudinary:", cloudinaryUrl);
@@ -268,36 +264,21 @@ async function fetchAnotherSong(lyrics, downloadedMp3) {
         
         const outputBuffer = Buffer.concat(chunks);
 
-        // Upload generated song buffer to Cloudinary
-        const tempOutputPath = path.join(__dirname, 'static', `temp_output_${songId}.mp3`);
-        await fs.promises.writeFile(tempOutputPath, outputBuffer);
-        
-        const result = await cloudinary.uploader.upload(tempOutputPath, {
-            resource_type: 'auto',
-            public_id: `song_${songId}`,
-            type: 'upload',
-            access_mode: 'public',
-            tags: ['auto_delete'],
-            invalidate: true,
-            transformation: [
-                {duration: "24h"}
-            ]
-        });
+        // Upload generated song buffer directly to Cloudinary with expiration
+        const generatedSongUrl = await uploadBufferToCloudinary(outputBuffer);
+        console.log("Uploaded generated song to Cloudinary:", generatedSongUrl);
 
-        // Clean up temp files
-        fs.unlink(tempOutputPath, (err) => {
-            if (err) console.error("Error deleting temp output file:", err);
-        });
+        // Clean up the downloaded file
         fs.unlink(downloadedMp3, (err) => {
             if (err) console.error("Error deleting the MP3 file:", err);
+            else console.log("Deleted the downloaded MP3 file");
         });
 
         // Format the output as JSON
         const formattedOutput = {
             status: 'success',
             data: {
-                songId: songId,
-                generatedAudio: result.secure_url,
+                generatedAudio: generatedSongUrl,  // Cloudinary URL of generated song
                 originalAudio: cloudinaryUrl,
                 timestamp: new Date().toISOString()
             }
@@ -316,23 +297,27 @@ async function fetchAnotherSong(lyrics, downloadedMp3) {
     }
 }
 
-// Fix the uploadToCloudinary function
-async function uploadToCloudinary(filePath) {
+// Add this new function to upload buffer to Cloudinary with expiration
+async function uploadBufferToCloudinary(buffer) {
     try {
-        // Read the file first
-        const fileData = await fs.promises.readFile(filePath);
+        // Convert buffer to base64
+        const base64Data = buffer.toString('base64');
         
-        const result = await cloudinary.uploader.upload(filePath, {
-            resource_type: 'auto',
-            public_id: `generated_${Date.now()}`,
-            type: 'upload',
-            access_mode: 'public',
-            tags: ['auto_delete'],
-            invalidate: true,
-            transformation: [
-                {duration: "24h"}
-            ]
-        });
+        const result = await cloudinary.uploader.upload(
+            `data:audio/mp3;base64,${base64Data}`, 
+            {
+                resource_type: 'auto',
+                public_id: `generated_${Date.now()}`,
+                type: 'upload',
+                access_mode: 'public',
+                tags: ['auto_delete'],
+                // Set expiration to 24 hours from now
+                invalidate: true,
+                transformation: [
+                    {duration: "24h"}
+                ]
+            }
+        );
         return result.secure_url;
     } catch (error) {
         console.error('Cloudinary upload error:', error);
@@ -379,90 +364,153 @@ async function open_ai_chat(params) {
 
 module.exports = { generateSong, findSimilarSong }
 
-async function downloadMp3(mp3) {
-  console.log("Downloading MP3 from URL:", mp3);
+async function downloadMp3(mp3Url) {
+  console.log("Downloading MP3 from URL:", mp3Url);
 
   try {
-    const tempFilePath = path.join(__dirname, "static", "temp_song.mp3");
-    const outputFilePath = path.join(__dirname, "static", "downloaded_song.mp3");
-
-    // First download the file
-    const writer = fs.createWriteStream(tempFilePath);
+    // Get the MP3 data as a buffer
     const response = await axios({
-      url: mp3,
+      url: mp3Url,
       method: "GET",
-      responseType: "stream",
+      responseType: "arraybuffer",
     });
 
-    response.data.pipe(writer);
+    // Upload original to Cloudinary
+    const tempResult = await cloudinary.uploader.upload(
+      `data:audio/mp3;base64,${Buffer.from(response.data).toString('base64')}`,
+      {
+        resource_type: 'auto',
+        public_id: `temp_${Date.now()}`,
+        type: 'upload',
+        access_mode: 'public',
+        tags: ['temp_file']
+      }
+    );
 
-    // Wait for download to complete
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
-
-    // Now trim the file to 59 seconds using ffmpeg
+    // Trim using ffmpeg with Cloudinary URL
     return new Promise((resolve, reject) => {
-      ffmpeg(tempFilePath)
+      const outputFileName = `trimmed_${Date.now()}.mp3`;
+      
+      ffmpeg(tempResult.secure_url)
         .setStartTime(0)
         .setDuration(59)
-        .output(outputFilePath)
-        .on('end', () => {
-          // Delete the temporary file
-          fs.unlink(tempFilePath, (err) => {
-            if (err) console.error("Error deleting temp file:", err);
-          });
-          console.log("Song trimmed and saved at:", outputFilePath);
-          resolve(outputFilePath);
+        .toFormat('mp3')
+        .on('end', async () => {
+          try {
+            // Delete the temporary file from Cloudinary
+            await cloudinary.uploader.destroy(tempResult.public_id, { resource_type: 'video' });
+            console.log("Temporary file deleted from Cloudinary");
+            resolve(outputFileName);
+          } catch (err) {
+            console.error("Error cleaning up temp file:", err);
+            resolve(outputFileName);
+          }
         })
         .on('error', (err) => {
           console.error("Error trimming file:", err);
           reject(err);
         })
-        .run();
+        .pipe(
+          cloudinary.uploader.upload_stream(
+            {
+              resource_type: 'auto',
+              public_id: outputFileName,
+              type: 'upload',
+              access_mode: 'public',
+              tags: ['trimmed']
+            },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result.secure_url);
+            }
+          )
+        );
     });
 
   } catch (error) {
-    console.error("Error processing the MP3 file:", error);
+    console.error("Error processing the MP3:", error);
     throw error;
   }
 }
 
-// Add this function to generate a unique song ID
-function generateSongId() {
-    return crypto.randomBytes(8).toString('hex');
+// Add this function for uploading files to Cloudinary
+async function uploadToCloudinary(filePath) {
+    try {
+        const result = await cloudinary.uploader.upload(filePath, {
+            resource_type: 'auto',
+            public_id: `original_${Date.now()}`,
+            type: 'upload',
+            access_mode: 'public',
+            tags: ['original'],
+            invalidate: true,
+            transformation: [
+                {duration: "24h"}
+            ]
+        });
+        return result.secure_url;
+    } catch (error) {
+        console.error('Cloudinary upload error:', error);
+        throw error;
+    }
 }
 
-// Add new endpoint to fetch song by ID
-app.get("/api/song/:songId", async (req, res) => {
+// Modify fetchAnotherSong to use the downloaded MP3 URL directly
+async function fetchAnotherSong(lyrics, downloadedMp3Url) {
     try {
-        const { songId } = req.params;
-        
-        // Search for the song in Cloudinary by public_id
-        const result = await cloudinary.search
-            .expression(`public_id:song_${songId}`)
-            .execute();
-
-        if (result.resources.length > 0) {
-            res.json({
-                status: 'success',
-                data: {
-                    songId: songId,
-                    audioUrl: result.resources[0].secure_url
-                }
-            });
-        } else {
-            res.status(404).json({
-                status: 'error',
-                error: 'Song not found or expired'
-            });
-        }
-    } catch (error) {
-        console.error("Error fetching song:", error);
-        res.status(500).json({
-            status: 'error',
-            error: 'Failed to fetch song'
+        // Initialize Replicate
+        const replicate = new Replicate({
+            auth: process.env.REPLICATE_API_TOKEN,
         });
+
+        // Call Replicate API
+        const outputStream = await replicate.run(
+            "minimax/music-01:a05a52e0512dc0942a782ba75429de791b46a567581f358f4c0c5623d5ff7242",
+            {
+                input: {
+                    lyrics: lyrics,
+                    song_file: downloadedMp3Url, 
+                    bitrate: 256000,
+                    sample_rate: 44100,
+                }
+            }
+        );
+
+        // Convert binary data to Buffer
+        const chunks = [];
+        for await (const chunk of outputStream) {
+            if (typeof chunk === 'object') {
+                const uint8Array = new Uint8Array(Object.values(chunk));
+                chunks.push(Buffer.from(uint8Array));
+            } else {
+                chunks.push(Buffer.from(chunk));
+            }
+        }
+        
+        const outputBuffer = Buffer.concat(chunks);
+
+        // Upload generated song buffer directly to Cloudinary with expiration
+        const generatedSongUrl = await uploadBufferToCloudinary(outputBuffer);
+        console.log("Uploaded generated song to Cloudinary:", generatedSongUrl);
+
+        // Format the output as JSON
+        const formattedOutput = {
+            status: 'success',
+            data: {
+                generatedAudio: generatedSongUrl,  // Cloudinary URL of generated song
+                originalAudio: downloadedMp3Url,
+                timestamp: new Date().toISOString()
+            }
+        };
+
+        console.log("Formatted Output:", JSON.stringify(formattedOutput, null, 2));
+        return formattedOutput;
+
+    } catch (error) {
+        console.error("Error in fetchAnotherSong:", error);
+        return {
+            status: 'error',
+            error: error.message,
+            timestamp: new Date().toISOString()
+        };
     }
-});
+}
