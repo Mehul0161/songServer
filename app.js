@@ -48,22 +48,28 @@ app.post("/api/generate", async (req, res) => {
     //  Generate Song Lyrics
     const lyrics = await generateSong(inputText);
     console.log(lyrics);
-
+    console.log("lyrics generated");
     // Find Similar Song
     const similarSong = await findSimilarSong(inputText);
+    console.log("similar song found");
 
     const { mp3Url } = similarSong;
-    const videoUrl = `https://www.youtube.com/watch?v=${mp3Url}`;
+
+  
     //convert the video to mp3
     const mp3 = await getMp3(mp3Url);
+    console.log("mp3 converted");
     console.log(mp3);
    //download the mp3
     const downloadedMp3 = await downloadMp3( mp3);
+    console.log("mp3 downloaded");
     
 
     // Fetch Another Song
     const fetchedSong = await fetchAnotherSong(lyrics, downloadedMp3);
+    console.log("song fetched");
     console.log(fetchedSong);
+
 
     //Response to Frontend
     res.json({
