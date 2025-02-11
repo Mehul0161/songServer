@@ -186,28 +186,58 @@ async function generateSong(keyword) {
 }
 
 // Find Similar Song
-async function findSimilarSong(inputText) {
-    const randomIndex = Math.floor(Math.random() * 10);
-  const query = "find a song that " + inputText ;
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-  try {
-    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=10&key=${YOUTUBE_API_KEY}`);
-    if (!response.ok) throw new Error('YouTube API request failed');
+async function findSimilarSong(query, retries = 3) {
+    console.log("Finding similar song for query:", query);
+    
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const searchQuery = encodeURIComponent(`${query} song`);
+            const response = await axios.get(
+                `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${searchQuery}&type=video&key=${process.env.YOUTUBE_API_KEY}&maxResults=5`,
+                {
+                    timeout: 10000,
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                }
+            );
 
-    const data = await response.json();
-    const videoId = data.items[randomIndex].id.videoId;
+            if (!response.data.items || response.data.items.length === 0) {
+                throw new Error('No videos found');
+            }
 
+            // Try each video until we find one that works
+            for (const item of response.data.items) {
+                try {
+                    const videoId = item.id.videoId;
+                    console.log(`Attempting to use video ID: ${videoId}`);
+                    
+                    // Test if MP3 conversion is possible
+                    const mp3Url = await getMp3(videoId);
+                    if (mp3Url) {
+                        return {
+                            title: item.snippet.title,
+                            mp3Url: videoId
+                        };
+                    }
+                } catch (err) {
+                    console.log(`Skipping video ${item.id.videoId} due to error:`, err.message);
+                    continue;
+                }
+            }
 
-    return { mp3Url: videoId };
+            throw new Error('No suitable videos found in search results');
 
-} catch (error) {
-    console.error('Error fetching YouTube videos:', error);
-    return [];
+        } catch (error) {
+            console.error(`Attempt ${attempt + 1} failed:`, error.message);
+            if (attempt === retries - 1) {
+                throw new Error(`Failed to find song after ${retries} attempts: ${error.message}`);
+            }
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+        }
+    }
 }
-}
-
-
-
 
 async function getMp3(mp3Url) {
     console.log("Converting video ID to MP3:", mp3Url);
@@ -237,16 +267,28 @@ async function getMp3(mp3Url) {
                     const jsonResponse = JSON.parse(body);
                     
                     if (!jsonResponse.link) {
-                        throw new Error('No MP3 link in response');
+                        throw new Error(`No MP3 link in response: ${body}`);
                     }
 
-                    // Verify URL is accessible
-                    try {
-                        await axios.head(jsonResponse.link);
-                        console.log("MP3 URL is accessible:", jsonResponse.link);
-                        resolve(jsonResponse.link);
-                    } catch (error) {
-                        throw new Error(`MP3 URL is not accessible: ${error.message}`);
+                    // Add a delay before checking URL
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+
+                    // Verify URL is accessible with multiple retries
+                    for (let i = 0; i < 3; i++) {
+                        try {
+                            const response = await axios.head(jsonResponse.link, {
+                                timeout: 5000,
+                                maxRedirects: 5
+                            });
+                            console.log("MP3 URL is accessible:", jsonResponse.link);
+                            resolve(jsonResponse.link);
+                            return;
+                        } catch (error) {
+                            if (i === 2) {
+                                throw error;
+                            }
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                        }
                     }
                 } catch (err) {
                     reject(new Error(`Failed to get valid MP3 URL: ${err.message}`));
@@ -256,6 +298,11 @@ async function getMp3(mp3Url) {
 
         req.on('error', (error) => {
             reject(new Error(`RapidAPI request failed: ${error.message}`));
+        });
+
+        req.setTimeout(15000, () => {
+            req.destroy();
+            reject(new Error('Request timed out'));
         });
 
         req.end();
