@@ -72,23 +72,12 @@ app.post("/api/generate", async (req, res) => {
         }
 
         const fetchedSong = await fetchAnotherSong(lyrics, downloadedMp3);
-        console.log("All generated URLs:", {
-            part1: fetchedSong.data.part1,
-            part2: fetchedSong.data.part2,
-            part3: fetchedSong.data.part3,
-            combined: fetchedSong.data.combinedAudio
-        });
 
         res.json({
             status: 'success',
             lyrics,
             originalSong: downloadedMp3,
-            processedParts: {
-                part1: fetchedSong.data.part1,
-                part2: fetchedSong.data.part2,
-                part3: fetchedSong.data.part3
-            },
-            finalSong: fetchedSong.data.combinedAudio,
+            generatedSong: fetchedSong.data.generatedAudio,
             timestamp: new Date().toISOString()
         });
     } catch (error) {
@@ -292,71 +281,43 @@ async function fetchAnotherSong(lyrics, downloadedMp3Url) {
             auth: process.env.REPLICATE_API_TOKEN,
         });
 
-        // Split lyrics into three parts
-        const lyricParts = splitLyricsInThree(lyrics);
-        const audioParts = [];
-        const partDuration = 60; // Each part processes 60 seconds now
-
-        // Process each part
-        for (let i = 0; i < 3; i++) {
-            console.log(`Processing part ${i + 1}/3`);
-            
-            const startTime = i * partDuration; // Each part starts at 0, 60, and 120 seconds
-            
-            const outputStream = await replicate.run(
-                "minimax/music-01:a05a52e0512dc0942a782ba75429de791b46a567581f358f4c0c5623d5ff7242",
-                {
-                    input: {
-                        lyrics: lyricParts[i],
-                        song_file: downloadedMp3Url,
-                        bitrate: 256000,
-                        sample_rate: 44100,
-                        start_time: startTime,
-                        duration: partDuration,  // Now 60 seconds each
-                        temperature: 0.8,
-                        max_length: 60  // Ensure model processes full 60 seconds
-                    }
-                }
-            );
-
-            // Collect part data
-            const partBuffers = [];
-            for await (const chunk of outputStream) {
-                if (typeof chunk === 'object') {
-                    const uint8Array = new Uint8Array(Object.values(chunk));
-                    partBuffers.push(Buffer.from(uint8Array));
-                } else {
-                    partBuffers.push(Buffer.from(chunk));
+        console.log('Processing song with Minimax...');
+        
+        // Process entire song in one request
+        const outputStream = await replicate.run(
+            "minimax/music-01:a05a52e0512dc0942a782ba75429de791b46a567581f358f4c0c5623d5ff7242",
+            {
+                input: {
+                    lyrics: lyrics,
+                    song_file: downloadedMp3Url,
+                    bitrate: 256000,
+                    sample_rate: 44100,
+                    temperature: 0.8
                 }
             }
-            
-            // Upload individual part to Cloudinary
-            const partBuffer = Buffer.concat(partBuffers);
-            const partUrl = await uploadBufferToCloudinary(partBuffer, `part_${i + 1}_60sec`);
-            
-            audioParts.push({
-                buffer: partBuffer,
-                url: partUrl,
-                startTime: startTime
-            });
-        }
+        );
 
-        // Combine all parts
-        const combinedResult = await combineSequentially(audioParts);
+        // Collect audio data
+        const audioBuffers = [];
+        for await (const chunk of outputStream) {
+            if (typeof chunk === 'object') {
+                const uint8Array = new Uint8Array(Object.values(chunk));
+                audioBuffers.push(Buffer.from(uint8Array));
+            } else {
+                audioBuffers.push(Buffer.from(chunk));
+            }
+        }
+        
+        // Upload to Cloudinary
+        const audioBuffer = Buffer.concat(audioBuffers);
+        const generatedUrl = await uploadBufferToCloudinary(audioBuffer, 'generated');
 
         return {
             status: 'success',
             data: {
-                part1: audioParts[0].url,
-                part2: audioParts[1].url,
-                part3: audioParts[2].url,
-                combinedAudio: combinedResult.url,  // URL of the fully combined song
+                generatedAudio: generatedUrl,
                 originalAudio: downloadedMp3Url,
-                timestamp: new Date().toISOString(),
-                durations: {
-                    perPart: partDuration,
-                    total: partDuration * 3
-                }
+                timestamp: new Date().toISOString()
             }
         };
 
