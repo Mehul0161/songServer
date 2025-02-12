@@ -60,7 +60,7 @@ app.post("/api/generate", async (req, res) => {
                 console.log("Found similar song URL:", similarSong.mp3Url);
 
                 const mp3 = await getMp3(similarSong.mp3Url);
-                downloadedMp3 = await downloadMp3(mp3);
+                downloadedMp3 = await downloadMp3(mp3, inputText);
                 console.log("Original song URL:", downloadedMp3);
                 break;
             } catch (error) {
@@ -384,7 +384,7 @@ function getFileSizeInMB(buffer) {
 }
 
 // Modify downloadMp3 to include size check
-async function downloadMp3(mp3Url, maxRetries = 3) {
+async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
     console.log("Downloading MP3 from URL:", mp3Url);
 
     try {
@@ -401,15 +401,11 @@ async function downloadMp3(mp3Url, maxRetries = 3) {
         const fileSizeInMB = getFileSizeInMB(response.data);
         console.log(`File size: ${fileSizeInMB.toFixed(2)} MB`);
 
-        // Check both minimum and maximum size
-        if (fileSizeInMB < 2.5) {
-            throw new Error('File size too small (minimum 2.5MB required)');
-        }
-        if (fileSizeInMB > 10) {
-            throw new Error('File size exceeds 10MB limit');
+        if (fileSizeInMB < 2.5 || fileSizeInMB > 10) {
+            throw new Error(`File size ${fileSizeInMB.toFixed(2)}MB is outside allowed range (2.5MB-10MB)`);
         }
 
-        // Rest of your existing downloadMp3 code...
+        // Rest of the upload code...
         const base64Data = Buffer.from(response.data).toString('base64');
         const cloudinaryResult = await cloudinary.uploader.upload(
             `data:audio/mp3;base64,${base64Data}`,
@@ -422,54 +418,15 @@ async function downloadMp3(mp3Url, maxRetries = 3) {
             }
         );
 
-        // Trim using ffmpeg with Cloudinary URL
-        return new Promise((resolve, reject) => {
-            const outputFileName = `trimmed_${Date.now()}`;
-            
-            ffmpeg(cloudinaryResult.secure_url)
-                .setStartTime(0)
-                .setDuration(59)
-                .toFormat('mp3')
-                .pipe(
-                    cloudinary.uploader.upload_stream(
-                        {
-                            resource_type: 'auto',
-                            public_id: outputFileName,
-                            type: 'upload',
-                            access_mode: 'public',
-                            tags: ['trimmed']
-                        },
-                        (error, result) => {
-                            if (error) {
-                                console.error("Error uploading trimmed file:", error);
-                                reject(error);
-                            } else {
-                                // Delete the temporary file
-                                cloudinary.uploader.destroy(cloudinaryResult.public_id, { resource_type: 'video' })
-                                    .then(() => {
-                                        console.log("Temporary file deleted from Cloudinary");
-                                        resolve(result.secure_url);
-                                    })
-                                    .catch(err => {
-                                        console.error("Error deleting temp file:", err);
-                                        resolve(result.secure_url);
-                                    });
-                            }
-                        }
-                    )
-                );
-        });
+        return cloudinaryResult.secure_url;
 
     } catch (error) {
-        // Handle both size-related errors
-        if ((error.message === 'File size exceeds 10MB limit' || 
-             error.message === 'File size too small (minimum 2.5MB required)') && 
-            maxRetries > 0) {
-            console.log(`Retrying with a different song. Retries left: ${maxRetries - 1}`);
-            // Find a new song and try again
+        console.error("Download/Upload error:", error);
+        if (maxRetries > 0) {
+            console.log(`Retrying with different song. Retries left: ${maxRetries - 1}`);
             const newSong = await findSimilarSong(inputText);
             const newMp3 = await getMp3(newSong.mp3Url);
-            return downloadMp3(newMp3, maxRetries - 1);
+            return downloadMp3(newMp3, inputText, maxRetries - 1);
         }
         throw error;
     }
