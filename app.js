@@ -250,31 +250,7 @@ async function getMp3(mp3Url) {
     });
 }
 
-
-// Add this helper function to split lyrics into chunks
-function splitLyrics(lyrics, chunkSize = 4) {
-    const lines = lyrics.split('\n').filter(line => line.trim());
-    const chunks = [];
-    for (let i = 0; i < lines.length; i += chunkSize) {
-        chunks.push(lines.slice(i, i + chunkSize).join('\n'));
-    }
-    return chunks;
-}
-
-// Add this function to split lyrics into exactly three parts
-function splitLyricsInThree(lyrics) {
-    const lines = lyrics.split('\n').filter(line => line.trim());
-    const totalLines = lines.length;
-    const partSize = Math.ceil(totalLines / 3);
-    
-    return [
-        lines.slice(0, partSize).join('\n'),
-        lines.slice(partSize, partSize * 2).join('\n'),
-        lines.slice(partSize * 2).join('\n')
-    ];
-}
-
-// Modify fetchAnotherSong function
+// Modify fetchAnotherSong to include response logging
 async function fetchAnotherSong(lyrics, downloadedMp3Url) {
     try {
         const replicate = new Replicate({
@@ -282,8 +258,11 @@ async function fetchAnotherSong(lyrics, downloadedMp3Url) {
         });
 
         console.log('Processing song with Minimax...');
+        console.log('Input:', {
+            lyrics: lyrics.substring(0, 100) + '...', // Log first 100 chars of lyrics
+            song_file: downloadedMp3Url
+        });
         
-        // Process entire song in one request
         const outputStream = await replicate.run(
             "minimax/music-01:a05a52e0512dc0942a782ba75429de791b46a567581f358f4c0c5623d5ff7242",
             {
@@ -297,7 +276,6 @@ async function fetchAnotherSong(lyrics, downloadedMp3Url) {
             }
         );
 
-        // Collect audio data
         const audioBuffers = [];
         for await (const chunk of outputStream) {
             if (typeof chunk === 'object') {
@@ -308,9 +286,13 @@ async function fetchAnotherSong(lyrics, downloadedMp3Url) {
             }
         }
         
-        // Upload to Cloudinary
         const audioBuffer = Buffer.concat(audioBuffers);
         const generatedUrl = await uploadBufferToCloudinary(audioBuffer, 'generated');
+
+        console.log('Minimax Processing Complete:', {
+            generatedUrl,
+            bufferSize: `${(audioBuffer.length / 1024 / 1024).toFixed(2)}MB`
+        });
 
         return {
             status: 'success',
@@ -355,50 +337,6 @@ async function uploadBufferToCloudinary(buffer, namePrefix = 'generated') {
         console.error('Cloudinary upload error:', error);
         throw error;
     }
-}
-
-// Update the combineSequentially function
-async function combineSequentially(audioChunks) {
-    return new Promise((resolve, reject) => {
-        const tempFiles = [];
-        
-        // Save chunks to temporary files
-        const savePromises = audioChunks.map(async (chunk, index) => {
-            const tempFile = path.join(__dirname, `temp_chunk_${index}.mp3`);
-            await fs.promises.writeFile(tempFile, chunk.buffer);
-            tempFiles.push(tempFile);
-            return tempFile;
-        });
-
-        Promise.all(savePromises).then(files => {
-            const outputFile = path.join(__dirname, `final_${Date.now()}.mp3`);
-            
-            // Use concat demuxer
-            ffmpeg()
-                .input('concat:' + files.join('|'))
-                .outputOptions('-acodec copy')
-                .save(outputFile)
-                .on('end', async () => {
-                    try {
-                        const finalBuffer = await fs.promises.readFile(outputFile);
-                        const combinedUrl = await uploadBufferToCloudinary(finalBuffer, 'full_combined');
-                        
-                        // Cleanup
-                        [...tempFiles, outputFile].forEach(file => {
-                            fs.unlink(file, () => {});
-                        });
-                        
-                        resolve({
-                            buffer: finalBuffer,
-                            url: combinedUrl
-                        });
-                    } catch (err) {
-                        reject(err);
-                    }
-                })
-                .on('error', reject);
-        }).catch(reject);
-    });
 }
 
 const headers = {
@@ -533,27 +471,6 @@ async function downloadMp3(mp3Url, maxRetries = 3) {
             const newMp3 = await getMp3(newSong.mp3Url);
             return downloadMp3(newMp3, maxRetries - 1);
         }
-        throw error;
-    }
-}
-
-// Add this function for uploading files to Cloudinary
-async function uploadToCloudinary(filePath) {
-    try {
-        const result = await cloudinary.uploader.upload(filePath, {
-            resource_type: 'auto',
-            public_id: `original_${Date.now()}`,
-            type: 'upload',
-            access_mode: 'public',
-            tags: ['original'],
-            invalidate: true,
-            transformation: [
-                {duration: "24h"}
-            ]
-        });
-        return result.secure_url;
-    } catch (error) {
-        console.error('Cloudinary upload error:', error);
         throw error;
     }
 }
