@@ -210,13 +210,7 @@ async function getMp3(mp3Url) {
             'x-rapidapi-key': process.env.RAPIDAPI_KEY,
             'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://www.youtube.com/',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0'
+            'Accept': '*/*'
         }
     };
 
@@ -231,7 +225,10 @@ async function getMp3(mp3Url) {
             res.on('end', async function () {
                 try {
                     const body = Buffer.concat(chunks).toString();
+                    console.log("RapidAPI Response:", body); // Log the full response
+
                     const jsonResponse = JSON.parse(body);
+                    console.log("Parsed Response:", jsonResponse);
 
                     if (jsonResponse.status === 'fail') {
                         throw new Error(`API Error: ${jsonResponse.msg}`);
@@ -241,27 +238,8 @@ async function getMp3(mp3Url) {
                         throw new Error(`No MP3 link in response: ${body}`);
                     }
 
-                    // Validate MP3 URL with browser-like headers
-                    try {
-                        const response = await axios.head(jsonResponse.link, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                'Accept': 'audio/webm,audio/ogg,audio/wav,audio/*;q=0.9,application/ogg;q=0.7,video/*;q=0.6,*/*;q=0.5',
-                                'Accept-Language': 'en-US,en;q=0.5',
-                                'Referer': 'https://www.youtube.com/',
-                                'Range': 'bytes=0-',
-                                'DNT': '1'
-                            },
-                            maxRedirects: 5,
-                            validateStatus: function (status) {
-                                return status >= 200 && status < 400; // Accept 3xx redirects
-                            }
-                        });
-                        console.log("Got valid MP3 URL:", jsonResponse.link);
-                        resolve(jsonResponse.link);
-                    } catch (error) {
-                        throw new Error('MP3 URL is not accessible');
-                    }
+                    console.log("Attempting to validate MP3 URL:", jsonResponse.link);
+                    resolve(jsonResponse.link);
                 } catch (err) {
                     reject(new Error(`Failed to get valid MP3: ${err.message}`));
                 }
@@ -269,6 +247,7 @@ async function getMp3(mp3Url) {
         });
 
         req.on('error', (error) => {
+            console.error("RapidAPI Request Error:", error);
             reject(new Error(`RapidAPI request failed: ${error.message}`));
         });
 
@@ -411,9 +390,18 @@ function getFileSizeInMB(buffer) {
 
 // Modify downloadMp3 to include size check
 async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
-    console.log("Downloading MP3 from URL:", mp3Url);
+    console.log("Attempting to download MP3 from URL:", mp3Url);
 
     try {
+        // Try to get headers first
+        const headResponse = await axios.head(mp3Url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*'
+            }
+        });
+        console.log("Head request successful, Content-Type:", headResponse.headers['content-type']);
+
         const response = await axios({
             url: mp3Url,
             method: "GET",
@@ -421,23 +409,19 @@ async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
             maxRedirects: 5,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'audio/webm,audio/ogg,audio/wav,audio/*;q=0.9,application/ogg;q=0.7,video/*;q=0.6,*/*;q=0.5',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.youtube.com/',
-                'Range': 'bytes=0-',
-                'DNT': '1',
-                'Connection': 'keep-alive'
+                'Accept': '*/*'
             }
         });
 
         const fileSizeInMB = getFileSizeInMB(response.data);
-        console.log(`File size: ${fileSizeInMB.toFixed(2)} MB`);
+        console.log(`Downloaded file size: ${fileSizeInMB.toFixed(2)} MB`);
 
         if (fileSizeInMB < 2.5 || fileSizeInMB > 10) {
             throw new Error(`File size ${fileSizeInMB.toFixed(2)}MB is outside allowed range (2.5MB-10MB)`);
         }
 
-        // Upload to Cloudinary
+        // Upload directly from memory to Cloudinary
+        console.log("Uploading to Cloudinary...");
         const base64Data = Buffer.from(response.data).toString('base64');
         const cloudinaryResult = await cloudinary.uploader.upload(
             `data:audio/mp3;base64,${base64Data}`,
@@ -449,15 +433,23 @@ async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
                 tags: ['temp_file']
             }
         );
+        console.log("Cloudinary upload successful:", cloudinaryResult.secure_url);
 
         return cloudinaryResult.secure_url;
 
     } catch (error) {
-        console.error("Download/Upload error:", error.message);
+        console.error("Download/Upload error details:", {
+            message: error.message,
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            headers: error.response?.headers
+        });
+
         if (maxRetries > 0) {
             console.log(`Retrying with different song. Retries left: ${maxRetries - 1}`);
             try {
                 const newSong = await findSimilarSong(inputText);
+                console.log("Found new song:", newSong.mp3Url);
                 const newMp3 = await getMp3(newSong.mp3Url);
                 return downloadMp3(newMp3, inputText, maxRetries - 1);
             } catch (retryError) {
