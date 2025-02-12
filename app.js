@@ -203,12 +203,12 @@ async function getMp3(mp3Url) {
     
     const options = {
         method: 'GET',
-        hostname: 'youtube-mp36.p.rapidapi.com',
+        hostname: 'youtube-mp3-download1.p.rapidapi.com',
         port: null,
         path: `/dl?id=${mp3Url}`,
         headers: {
             'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-            'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
+            'x-rapidapi-host': 'youtube-mp3-download1.p.rapidapi.com',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*'
         }
@@ -225,21 +225,47 @@ async function getMp3(mp3Url) {
             res.on('end', async function () {
                 try {
                     const body = Buffer.concat(chunks).toString();
-                    console.log("RapidAPI Response:", body); // Log the full response
+                    console.log("RapidAPI Response:", body);
 
                     const jsonResponse = JSON.parse(body);
                     console.log("Parsed Response:", jsonResponse);
 
-                    if (jsonResponse.status === 'fail') {
-                        throw new Error(`API Error: ${jsonResponse.msg}`);
+                    // Different API response structure
+                    if (!jsonResponse.success) {
+                        throw new Error(`API Error: ${jsonResponse.msg || 'Unknown error'}`);
                     }
 
-                    if (!jsonResponse.link) {
-                        throw new Error(`No MP3 link in response: ${body}`);
+                    if (!jsonResponse.download_url) {
+                        throw new Error(`No MP3 download URL in response`);
                     }
 
-                    console.log("Attempting to validate MP3 URL:", jsonResponse.link);
-                    resolve(jsonResponse.link);
+                    console.log("Got MP3 download URL:", jsonResponse.download_url);
+                    
+                    // Immediately download the file to avoid expiration
+                    const audioResponse = await axios({
+                        url: jsonResponse.download_url,
+                        method: 'GET',
+                        responseType: 'arraybuffer',
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        }
+                    });
+
+                    // Upload directly to Cloudinary
+                    const base64Data = Buffer.from(audioResponse.data).toString('base64');
+                    const cloudinaryResult = await cloudinary.uploader.upload(
+                        `data:audio/mp3;base64,${base64Data}`,
+                        {
+                            resource_type: 'auto',
+                            public_id: `yt_${Date.now()}`,
+                            type: 'upload',
+                            access_mode: 'public',
+                            tags: ['temp_file']
+                        }
+                    );
+
+                    console.log("Uploaded to Cloudinary:", cloudinaryResult.secure_url);
+                    resolve(cloudinaryResult.secure_url);
                 } catch (err) {
                     reject(new Error(`Failed to get valid MP3: ${err.message}`));
                 }
