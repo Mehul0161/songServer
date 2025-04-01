@@ -60,7 +60,7 @@ app.post("/api/generate", async (req, res) => {
                 console.log("Found similar song URL:", similarSong.mp3Url);
 
                 const mp3 = await getMp3(similarSong.mp3Url);
-                downloadedMp3 = await downloadMp3(mp3, inputText);
+                downloadedMp3 = await downloadMp3(mp3);
                 console.log("Original song URL:", downloadedMp3);
                 break;
             } catch (error) {
@@ -180,7 +180,8 @@ async function findSimilarSong(inputText) {
   const query = "find a song that " + inputText ;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
   try {
-    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=10&key=${YOUTUBE_API_KEY}`);
+    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=10&videoDuration=medium&key=${YOUTUBE_API_KEY}
+`);
     if (!response.ok) throw new Error('YouTube API request failed');
 
     const data = await response.json();
@@ -203,14 +204,12 @@ async function getMp3(mp3Url) {
     
     const options = {
         method: 'GET',
-        hostname: 'youtube-mp3-download1.p.rapidapi.com',
+        hostname: 'youtube-mp36.p.rapidapi.com',
         port: null,
         path: `/dl?id=${mp3Url}`,
         headers: {
-            'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-            'x-rapidapi-host': 'youtube-mp3-download1.p.rapidapi.com',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*'
+            'x-rapidapi-key': process.env.RAPIDAPI_KEY,  // Use environment variable
+            'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com'
         }
     };
 
@@ -222,77 +221,68 @@ async function getMp3(mp3Url) {
                 chunks.push(chunk);
             });
 
-            res.on('end', async function () {
+            res.on('end', function () {
                 try {
                     const body = Buffer.concat(chunks).toString();
-                    console.log("RapidAPI Response:", body);
-
                     const jsonResponse = JSON.parse(body);
-                    console.log("Parsed Response:", jsonResponse);
 
-                    // Different API response structure
-                    if (!jsonResponse.success) {
-                        throw new Error(`API Error: ${jsonResponse.msg || 'Unknown error'}`);
+                    // Check for API specific error responses
+                    if (jsonResponse.status === 'fail') {
+                        throw new Error(`API Error: ${jsonResponse.msg}`);
                     }
 
-                    if (!jsonResponse.download_url) {
-                        throw new Error(`No MP3 download URL in response`);
+                    if (!jsonResponse.link) {
+                        throw new Error(`No MP3 link in response: ${body}`);
                     }
 
-                    console.log("Got MP3 download URL:", jsonResponse.download_url);
-                    
-                    // Immediately download the file to avoid expiration
-                    const audioResponse = await axios({
-                        url: jsonResponse.download_url,
-                        method: 'GET',
-                        responseType: 'arraybuffer',
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        }
-                    });
-
-                    // Upload directly to Cloudinary
-                    const base64Data = Buffer.from(audioResponse.data).toString('base64');
-                    const cloudinaryResult = await cloudinary.uploader.upload(
-                        `data:audio/mp3;base64,${base64Data}`,
-                        {
-                            resource_type: 'auto',
-                            public_id: `yt_${Date.now()}`,
-                            type: 'upload',
-                            access_mode: 'public',
-                            tags: ['temp_file']
-                        }
-                    );
-
-                    console.log("Uploaded to Cloudinary:", cloudinaryResult.secure_url);
-                    resolve(cloudinaryResult.secure_url);
+                    console.log("Got MP3 URL:", jsonResponse.link);
+                    resolve(jsonResponse.link);
                 } catch (err) {
-                    reject(new Error(`Failed to get valid MP3: ${err.message}`));
+                    reject(new Error(`Failed to parse response: ${err.message}`));
                 }
             });
         });
 
         req.on('error', (error) => {
-            console.error("RapidAPI Request Error:", error);
-            reject(new Error(`RapidAPI request failed: ${error.message}`));
+            reject(new Error(`Request failed: ${error.message}`));
         });
 
         req.end();
     });
 }
 
-// Modify fetchAnotherSong to include response logging
+
+// Add this helper function to split lyrics into chunks
+function splitLyrics(lyrics, chunkSize = 4) {
+    const lines = lyrics.split('\n').filter(line => line.trim());
+    const chunks = [];
+    for (let i = 0; i < lines.length; i += chunkSize) {
+        chunks.push(lines.slice(i, i + chunkSize).join('\n'));
+    }
+    return chunks;
+}
+
+// Add this function to split lyrics into exactly three parts
+function splitLyricsInThree(lyrics) {
+    const lines = lyrics.split('\n').filter(line => line.trim());
+    const totalLines = lines.length;
+    const partSize = Math.ceil(totalLines / 3);
+    
+    return [
+        lines.slice(0, partSize).join('\n'),
+        lines.slice(partSize, partSize * 2).join('\n'),
+        lines.slice(partSize * 2).join('\n')
+    ];
+}
+
+// Modify fetchAnotherSong function
 async function fetchAnotherSong(lyrics, downloadedMp3Url) {
     try {
         const replicate = new Replicate({
             auth: process.env.REPLICATE_API_TOKEN,
         });
 
-        console.log('Processing song with Minimax...');
-        console.log('Input:', {
-            lyrics: lyrics.substring(0, 100) + '...', // Log first 100 chars of lyrics
-            song_file: downloadedMp3Url
-        });
+        console.log('Processing entire song with Minimax...');
         
         const outputStream = await replicate.run(
             "minimax/music-01:a05a52e0512dc0942a782ba75429de791b46a567581f358f4c0c5623d5ff7242",
@@ -370,6 +360,50 @@ async function uploadBufferToCloudinary(buffer, namePrefix = 'generated') {
     }
 }
 
+// Update the combineSequentially function
+async function combineSequentially(audioChunks) {
+    return new Promise((resolve, reject) => {
+        const tempFiles = [];
+        
+        // Save chunks to temporary files
+        const savePromises = audioChunks.map(async (chunk, index) => {
+            const tempFile = path.join(__dirname, `temp_chunk_${index}.mp3`);
+            await fs.promises.writeFile(tempFile, chunk.buffer);
+            tempFiles.push(tempFile);
+            return tempFile;
+        });
+
+        Promise.all(savePromises).then(files => {
+            const outputFile = path.join(__dirname, `final_${Date.now()}.mp3`);
+            
+            // Use concat demuxer
+            ffmpeg()
+                .input('concat:' + files.join('|'))
+                .outputOptions('-acodec copy')
+                .save(outputFile)
+                .on('end', async () => {
+                    try {
+                        const finalBuffer = await fs.promises.readFile(outputFile);
+                        const combinedUrl = await uploadBufferToCloudinary(finalBuffer, 'full_combined');
+                        
+                        // Cleanup
+                        [...tempFiles, outputFile].forEach(file => {
+                            fs.unlink(file, () => {});
+                        });
+                        
+                        resolve({
+                            buffer: finalBuffer,
+                            url: combinedUrl
+                        });
+                    } catch (err) {
+                        reject(err);
+                    }
+                })
+                .on('error', reject);
+        }).catch(reject);
+    });
+}
+
 const headers = {
   "Content-Type": "application/json",
   Authorization: "Bearer fw_3Zf8JVu43bKrmzu9n6ykF2Bw",
@@ -415,39 +449,32 @@ function getFileSizeInMB(buffer) {
 }
 
 // Modify downloadMp3 to include size check
-async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
-    console.log("Attempting to download MP3 from URL:", mp3Url);
+async function downloadMp3(mp3Url, maxRetries = 3) {
+    console.log("Downloading MP3 from URL:", mp3Url);
 
     try {
-        // Try to get headers first
-        const headResponse = await axios.head(mp3Url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': '*/*'
-            }
-        });
-        console.log("Head request successful, Content-Type:", headResponse.headers['content-type']);
-
         const response = await axios({
             url: mp3Url,
             method: "GET",
             responseType: "arraybuffer",
-            maxRedirects: 5,
+            timeout: 10000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': '*/*'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
 
         const fileSizeInMB = getFileSizeInMB(response.data);
-        console.log(`Downloaded file size: ${fileSizeInMB.toFixed(2)} MB`);
+        console.log(`File size: ${fileSizeInMB.toFixed(2)} MB`);
 
-        if (fileSizeInMB < 2.5 || fileSizeInMB > 10) {
-            throw new Error(`File size ${fileSizeInMB.toFixed(2)}MB is outside allowed range (2.5MB-10MB)`);
+        // Check both minimum and maximum size
+        if (fileSizeInMB < 2.5) {
+            throw new Error('File size too small (minimum 2.5MB required)');
+        }
+        if (fileSizeInMB > 10) {
+            throw new Error('File size exceeds 10MB limit');
         }
 
-        // Upload directly from memory to Cloudinary
-        console.log("Uploading to Cloudinary...");
+        // Rest of your existing downloadMp3 code...
         const base64Data = Buffer.from(response.data).toString('base64');
         const cloudinaryResult = await cloudinary.uploader.upload(
             `data:audio/mp3;base64,${base64Data}`,
@@ -459,30 +486,77 @@ async function downloadMp3(mp3Url, inputText, maxRetries = 3) {
                 tags: ['temp_file']
             }
         );
-        console.log("Cloudinary upload successful:", cloudinaryResult.secure_url);
 
-        return cloudinaryResult.secure_url;
-
-    } catch (error) {
-        console.error("Download/Upload error details:", {
-            message: error.message,
-            status: error.response?.status,
-            statusText: error.response?.statusText,
-            headers: error.response?.headers
+        // Trim using ffmpeg with Cloudinary URL
+        return new Promise((resolve, reject) => {
+            const outputFileName = `trimmed_${Date.now()}`;
+            
+            ffmpeg(cloudinaryResult.secure_url)
+                .setStartTime(0)
+                .setDuration(59)
+                .toFormat('mp3')
+                .pipe(
+                    cloudinary.uploader.upload_stream(
+                        {
+                            resource_type: 'auto',
+                            public_id: outputFileName,
+                            type: 'upload',
+                            access_mode: 'public',
+                            tags: ['trimmed']
+                        },
+                        (error, result) => {
+                            if (error) {
+                                console.error("Error uploading trimmed file:", error);
+                                reject(error);
+                            } else {
+                                // Delete the temporary file
+                                cloudinary.uploader.destroy(cloudinaryResult.public_id, { resource_type: 'video' })
+                                    .then(() => {
+                                        console.log("Temporary file deleted from Cloudinary");
+                                        resolve(result.secure_url);
+                                    })
+                                    .catch(err => {
+                                        console.error("Error deleting temp file:", err);
+                                        resolve(result.secure_url);
+                                    });
+                            }
+                        }
+                    )
+                );
         });
 
-        if (maxRetries > 0) {
-            console.log(`Retrying with different song. Retries left: ${maxRetries - 1}`);
-            try {
-                const newSong = await findSimilarSong(inputText);
-                console.log("Found new song:", newSong.mp3Url);
-                const newMp3 = await getMp3(newSong.mp3Url);
-                return downloadMp3(newMp3, inputText, maxRetries - 1);
-            } catch (retryError) {
-                console.error("Retry failed:", retryError.message);
-                throw retryError;
-            }
+    } catch (error) {
+        // Handle both size-related errors
+        if ((error.message === 'File size exceeds 10MB limit' || 
+             error.message === 'File size too small (minimum 2.5MB required)') && 
+            maxRetries > 0) {
+            console.log(`Retrying with a different song. Retries left: ${maxRetries - 1}`);
+            // Find a new song and try again
+            const newSong = await findSimilarSong(inputText);
+            const newMp3 = await getMp3(newSong.mp3Url);
+            return downloadMp3(newMp3, maxRetries - 1);
         }
+        throw error;
+    }
+}
+
+// Add this function for uploading files to Cloudinary
+async function uploadToCloudinary(filePath) {
+    try {
+        const result = await cloudinary.uploader.upload(filePath, {
+            resource_type: 'auto',
+            public_id: `original_${Date.now()}`,
+            type: 'upload',
+            access_mode: 'public',
+            tags: ['original'],
+            invalidate: true,
+            transformation: [
+                {duration: "24h"}
+            ]
+        });
+        return result.secure_url;
+    } catch (error) {
+        console.error('Cloudinary upload error:', error);
         throw error;
     }
 }
